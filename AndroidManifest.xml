@@ -102,7 +102,7 @@
         <service android:name="com.cyanogenmod.trebuchet.RocketLauncher"
             android:label="@string/dream_name"
             android:exported="true"
-            android:icon="@drawable/ic_launcher_home" >
+            android:icon="@mipmap/ic_launcher_home" >
             <intent-filter>
                 <action android:name="android.service.dreams.DreamService" />
                 <category android:name="android.intent.category.DEFAULT" />
