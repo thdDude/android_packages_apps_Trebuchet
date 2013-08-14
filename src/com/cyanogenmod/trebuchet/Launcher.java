@@ -267,6 +267,8 @@ public final class Launcher extends Activity
     private boolean mWaitingForResult;
     private boolean mOnResumeNeedsLoad;
 
+    private ArrayList<Runnable> mOnResumeCallbacks = new ArrayList<Runnable>();
+
     // Keep track of whether the user has left launcher
     private static boolean sPausedFromUserAction = false;
 
@@ -301,7 +303,6 @@ public final class Launcher extends Activity
     private static Drawable.ConstantState[] sAppMarketIcon = new Drawable.ConstantState[2];
 
     private Drawable mWorkspaceBackgroundDrawable;
-    private Drawable mBlackBackgroundDrawable;
 
     private final ArrayList<Integer> mSynchronouslyBoundPages = new ArrayList<Integer>();
 
@@ -788,6 +789,18 @@ public final class Launcher extends Activity
     }
 
     @Override
+    protected void onStop() {
+        super.onStop();
+        FirstFrameAnimatorHelper.setIsVisible(false);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        FirstFrameAnimatorHelper.setIsVisible(true);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
 
@@ -817,6 +830,12 @@ public final class Launcher extends Activity
             mRestoring = false;
             mOnResumeNeedsLoad = false;
         }
+        // We might have postponed some bind calls until onResume (see waitUntilResume) --
+        // execute them here
+        for (int i = 0; i < mOnResumeCallbacks.size(); i++) {
+            mOnResumeCallbacks.get(i).run();
+        }
+        mOnResumeCallbacks.clear();
 
         // Reset the pressed state of icons that were locked in the press state while activities
         // were launching
@@ -999,7 +1018,6 @@ public final class Launcher extends Activity
 
         mLauncherView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
         mWorkspaceBackgroundDrawable = getResources().getDrawable(R.drawable.workspace_bg);
-        mBlackBackgroundDrawable = new ColorDrawable(Color.BLACK);
 
         // Setup the drag layer
         mDragLayer.setup(this, dragController);
@@ -1484,7 +1502,7 @@ public final class Launcher extends Activity
         filter.addAction(Intent.ACTION_USER_PRESENT);
         filter.addAction(Intent.ACTION_SET_WALLPAPER);
         registerReceiver(mReceiver, filter);
-
+        FirstFrameAnimatorHelper.initializeDrawListener(getWindow().getDecorView());
         mAttached = true;
         mVisible = true;
     }
@@ -1513,19 +1531,25 @@ public final class Launcher extends Activity
                 final ViewTreeObserver observer = mWorkspace.getViewTreeObserver();
                 // We want to let Launcher draw itself at least once before we force it to build
                 // layers on all the workspace pages, so that transitioning to Launcher from other
-                // apps is nice and speedy. Usually the first call to preDraw doesn't correspond to
-                // a true draw so we wait until the second preDraw call to be safe
-                observer.addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
-                    public boolean onPreDraw() {
+                // apps is nice and speedy.
+                observer.addOnDrawListener(new ViewTreeObserver.OnDrawListener() {
+                    private boolean mStarted = false;
+                    public void onDraw() {
+                        if (mStarted) return;
+                        mStarted = true;
                         // We delay the layer building a bit in order to give
                         // other message processing a time to run.  In particular
                         // this avoids a delay in hiding the IME if it was
                         // currently shown, because doing that may involve
                         // some communication back with the app.
                         mWorkspace.postDelayed(mBuildLayersRunnable, 500);
-
-                        observer.removeOnPreDrawListener(this);
-                        return true;
+                        final ViewTreeObserver.OnDrawListener listener = this;
+                        mWorkspace.post(new Runnable() {
+                                public void run() {
+                                    mWorkspace.getViewTreeObserver().removeOnDrawListener(listener);
+                                }
+                            });
+                        return;
                     }
                 });
             }
@@ -2722,6 +2746,11 @@ public final class Launcher extends Activity
         }
         folder.animateOpen();
         growAndFadeOutFolderIcon(folderIcon);
+
+        // Notify the accessibility manager that this folder "window" has appeared and occluded
+        // the workspace items
+        folder.sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+        getDragLayer().sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
     }
 
     public void closeFolder() {
@@ -2746,6 +2775,10 @@ public final class Launcher extends Activity
             shrinkAndFadeInFolderIcon(fi);
         }
         folder.animateClosed();
+
+        // Notify the accessibility manager that this folder "window" has disappeard and no
+        // longer occludeds the workspace items
+        getDragLayer().sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
     }
 
     public boolean onLongClick(View v) {
@@ -2858,7 +2891,7 @@ public final class Launcher extends Activity
         if (mDrawerShowWallpaper) return;
         if (mLauncherView != null) {
             mLauncherView.setBackground(workspace ?
-                    mWorkspaceBackgroundDrawable : mBlackBackgroundDrawable);
+                    mWorkspaceBackgroundDrawable : null);
         }
     }
 
@@ -2959,6 +2992,7 @@ public final class Launcher extends Activity
      */
     private void showAppsCustomizeHelper(final boolean animated, final boolean springLoaded) {
         if (mStateAnimation != null) {
+            mStateAnimation.setDuration(0);
             mStateAnimation.cancel();
             mStateAnimation = null;
         }
@@ -3001,7 +3035,7 @@ public final class Launcher extends Activity
 
             toView.setVisibility(View.VISIBLE);
             toView.setAlpha(0f);
-            final ObjectAnimator alphaAnim = ObjectAnimator
+            final ObjectAnimator alphaAnim = LauncherAnimUtils
                 .ofFloat(toView, "alpha", 0f, 1f)
                 .setDuration(fadeDuration);
             alphaAnim.setInterpolator(new DecelerateInterpolator(1.5f));
@@ -3072,7 +3106,6 @@ public final class Launcher extends Activity
             }
 
             boolean delayAnim = false;
-            final ViewTreeObserver observer;
 
             dispatchOnLauncherTransitionPrepare(fromView, animated, false);
             dispatchOnLauncherTransitionPrepare(toView, animated, false);
@@ -3082,10 +3115,7 @@ public final class Launcher extends Activity
             if ((toView.getContent().getMeasuredWidth() == 0) ||
                     (mWorkspace.getMeasuredWidth() == 0) ||
                     (toView.getMeasuredWidth() == 0)) {
-                observer = mWorkspace.getViewTreeObserver();
                 delayAnim = true;
-            } else {
-                observer = null;
             }
 
             final AnimatorSet stateAnimation = mStateAnimation;
@@ -3098,25 +3128,17 @@ public final class Launcher extends Activity
                     setPivotsForZoom(toView);
                     dispatchOnLauncherTransitionStart(fromView, animated, false);
                     dispatchOnLauncherTransitionStart(toView, animated, false);
-                    toView.post(new Runnable() {
-                        public void run() {
-                            // Check that mStateAnimation hasn't changed while
-                            // we waited for a layout/draw pass
-                            if (mStateAnimation != stateAnimation)
-                                return;
-                            mStateAnimation.start();
-                        }
-                    });
+                    LauncherAnimUtils.startAnimationAfterNextDraw(mStateAnimation, toView);
                 }
             };
             if (delayAnim) {
-                final OnGlobalLayoutListener delayedStart = new OnGlobalLayoutListener() {
-                    public void onGlobalLayout() {
-                        toView.post(startAnimRunnable);
-                        observer.removeOnGlobalLayoutListener(this);
-                    }
-                };
-                observer.addOnGlobalLayoutListener(delayedStart);
+                final ViewTreeObserver observer = toView.getViewTreeObserver();
+                observer.addOnGlobalLayoutListener(new OnGlobalLayoutListener() {
+                        public void onGlobalLayout() {
+                            startAnimRunnable.run();
+                            toView.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                        }
+                    });
             } else {
                 startAnimRunnable.run();
             }
@@ -3158,6 +3180,7 @@ public final class Launcher extends Activity
             final Runnable onCompleteRunnable) {
 
         if (mStateAnimation != null) {
+            mStateAnimation.setDuration(0);
             mStateAnimation.cancel();
             mStateAnimation = null;
         }
@@ -3193,7 +3216,7 @@ public final class Launcher extends Activity
                 setDuration(duration).
                 setInterpolator(new Workspace.ZoomInInterpolator());
 
-            final ObjectAnimator alphaAnim = ObjectAnimator
+            final ObjectAnimator alphaAnim = LauncherAnimUtils
                 .ofFloat(fromView, "alpha", 1f, 0f)
                 .setDuration(fadeOutDuration);
             alphaAnim.setInterpolator(new AccelerateDecelerateInterpolator());
@@ -3253,14 +3276,7 @@ public final class Launcher extends Activity
             }
             dispatchOnLauncherTransitionStart(fromView, animated, true);
             dispatchOnLauncherTransitionStart(toView, animated, true);
-            final Animator stateAnimation = mStateAnimation;
-            mWorkspace.post(new Runnable() {
-                public void run() {
-                    if (stateAnimation != mStateAnimation)
-                        return;
-                    mStateAnimation.start();
-                }
-            });
+            LauncherAnimUtils.startAnimationAfterNextDraw(mStateAnimation, toView);
         } else {
             fromView.setVisibility(View.GONE);
             dispatchOnLauncherTransitionPrepare(fromView, animated, true);
@@ -3807,6 +3823,30 @@ public final class Launcher extends Activity
     }
 
     /**
+     * If the activity is currently paused, signal that we need to run the passed Runnable
+     * in onResume.
+     *
+     * This needs to be called from incoming places where resources might have been loaded
+     * while we are paused.  That is becaues the Configuration might be wrong
+     * when we're not running, and if it comes back to what it was when we
+     * were paused, we are not restarted.
+     *
+     * Implementation of the method from LauncherModel.Callbacks.
+     *
+     * @return true if we are currently paused.  The caller might be able to
+     * skip some work in that case since we will come back again.
+     */
+    private boolean waitUntilResume(Runnable run) {
+        if (mPaused) {
+            Log.i(TAG, "Deferring update until onResume");
+            mOnResumeCallbacks.add(run);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /**
      * If the activity is currently paused, signal that we need to re-run the loader
      * in onResume.
      *
@@ -3847,8 +3887,12 @@ public final class Launcher extends Activity
      * Implementation of the method from LauncherModel.Callbacks.
      */
     public void startBinding() {
-        final Workspace workspace = mWorkspace;
+        // If we're starting binding all over again, clear any bind calls we'd postponed in
+        // the past (see waitUntilResume) -- we don't need them since we're starting binding
+        // from scratch again
+        mOnResumeCallbacks.clear();
 
+        final Workspace workspace = mWorkspace;
         mNewShortcutAnimatePage = -1;
         mNewShortcutAnimateViews.clear();
         mWorkspace.clearDropTargets();
@@ -3869,8 +3913,14 @@ public final class Launcher extends Activity
      *
      * Implementation of the method from LauncherModel.Callbacks.
      */
-    public void bindItems(ArrayList<ItemInfo> shortcuts, int start, int end) {
-        setLoadOnResume();
+    public void bindItems(final ArrayList<ItemInfo> shortcuts, final int start, final int end) {
+        if (waitUntilResume(new Runnable() {
+                public void run() {
+                    bindItems(shortcuts, start, end);
+                }
+            })) {
+            return;
+        }
 
         // Get the list of added shortcuts and intersect them with the set of shortcuts here
         Set<String> newApps = new HashSet<String>();
@@ -3930,8 +3980,14 @@ public final class Launcher extends Activity
     /**
      * Implementation of the method from LauncherModel.Callbacks.
      */
-    public void bindFolders(HashMap<Long, FolderInfo> folders) {
-        setLoadOnResume();
+    public void bindFolders(final HashMap<Long, FolderInfo> folders) {
+        if (waitUntilResume(new Runnable() {
+                public void run() {
+                    bindFolders(folders);
+                }
+            })) {
+            return;
+        }
         sFolders.clear();
         sFolders.putAll(folders);
     }
@@ -3941,8 +3997,14 @@ public final class Launcher extends Activity
      *
      * Implementation of the method from LauncherModel.Callbacks.
      */
-    public void bindAppWidget(LauncherAppWidgetInfo item) {
-        setLoadOnResume();
+    public void bindAppWidget(final LauncherAppWidgetInfo item) {
+        if (waitUntilResume(new Runnable() {
+                public void run() {
+                    bindAppWidget(item);
+                }
+            })) {
+            return;
+        }
 
         final long start = DEBUG_WIDGETS ? SystemClock.uptimeMillis() : 0;
         if (DEBUG_WIDGETS) {
@@ -3983,8 +4045,13 @@ public final class Launcher extends Activity
      * Implementation of the method from LauncherModel.Callbacks.
      */
     public void finishBindingItems() {
-        setLoadOnResume();
-
+        if (waitUntilResume(new Runnable() {
+                public void run() {
+                    finishBindingItems();
+                }
+            })) {
+            return;
+        }
         if (mSavedState != null) {
             if (!mWorkspace.hasFocus()) {
                 mWorkspace.getChildAt(mWorkspace.getCurrentPage()).requestFocus();
@@ -4168,8 +4235,15 @@ public final class Launcher extends Activity
      *
      * Implementation of the method from LauncherModel.Callbacks.
      */
-    public void bindAppsAdded(ArrayList<ApplicationInfo> apps) {
-        setLoadOnResume();
+    public void bindAppsAdded(final ArrayList<ApplicationInfo> apps) {
+        if (waitUntilResume(new Runnable() {
+                public void run() {
+                    bindAppsAdded(apps);
+                }
+            })) {
+            return;
+        }
+
 
         if (mAppsCustomizeContent != null) {
             mAppsCustomizeContent.addApps(apps);
@@ -4181,8 +4255,15 @@ public final class Launcher extends Activity
      *
      * Implementation of the method from LauncherModel.Callbacks.
      */
-    public void bindAppsUpdated(ArrayList<ApplicationInfo> apps) {
-        setLoadOnResume();
+    public void bindAppsUpdated(final ArrayList<ApplicationInfo> apps) {
+        if (waitUntilResume(new Runnable() {
+                public void run() {
+                    bindAppsUpdated(apps);
+                }
+            })) {
+            return;
+        }
+
         if (mWorkspace != null) {
             mWorkspace.updateShortcuts(apps);
         }
