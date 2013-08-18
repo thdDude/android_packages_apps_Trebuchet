@@ -3723,7 +3723,8 @@ public final class Launcher extends Activity
             Intent intent = new Intent(RecognizerIntent.ACTION_WEB_SEARCH);
             activityName = intent.resolveActivity(getPackageManager());
         }
-        if (searchVisible && activityName != null) {
+        if (searchVisible && activityName != null && getPackageManager().hasSystemFeature(
+                "android.hardware.microphone")) {
             int coi = getCurrentOrientationIndexForGlobalIcons();
             sVoiceSearchIcon[coi] = updateButtonWithIconFromExternalActivity(
                     R.id.voice_button, activityName, R.drawable.ic_home_voice_search_holo,
