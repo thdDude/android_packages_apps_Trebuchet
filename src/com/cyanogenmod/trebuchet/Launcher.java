@@ -1688,14 +1688,16 @@ public final class Launcher extends Activity
 
             final boolean drawerIntent = intent.hasCategory("com.cyanogenmod.trebuchet.APP_DRAWER");
             ActivityManager am = (ActivityManager) getSystemService(Activity.ACTIVITY_SERVICE);
-            //if (!alreadyOnHome) {
+            if (!alreadyOnHome && drawerIntent) {
                 try {
                     mDrawerBackActivity = am.getRunningTasks(2).get(1).topActivity.flattenToString();
                 } catch (Exception e) {
                     mDrawerBackActivity = "";
                 }
                 if (mDrawerBackActivity.contains("trebuchet")) mDrawerBackActivity = "";
-            //}
+            } else {
+                mDrawerBackActivity = "";
+            }
 
             Runnable processIntent = new Runnable() {
                 public void run() {
